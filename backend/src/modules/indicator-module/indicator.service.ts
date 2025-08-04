@@ -1,9 +1,4 @@
 
-
-
-
-
-
 import { Injectable, OnModuleInit, OnModuleDestroy, Inject, Logger } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { InjectModel } from '@nestjs/mongoose';
@@ -13,6 +8,7 @@ import * as TradingViewModule from '@mathieuc/tradingview';
 const { Client, getIndicator } = TradingViewModule;
 import * as TradingView from '@mathieuc/tradingview';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import axios from 'axios';
 
 interface IndicatorSettings {
   indicator: 'EMA50' | 'EMA200' | 'RSI' | 'MACD' | 'FibonacciBollingerBands' | 'VWAP' | 'BollingerBands' | 'CandlestickPatterns' | 'Nadaraya-Watson-LuxAlgo' | 'SRv2' | 'Pivot Points High Low' | 'Pivot Points Standard';
@@ -284,48 +280,92 @@ export class IndicatorService implements OnModuleInit, OnModuleDestroy {
   private tvClients: { [symbol: string]: any } = {};
   private charts: { [key: string]: any } = {};
   private proxyList: string[] = [
-    'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10007',
-    'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10008',
-    'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10009',
-    'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10010',
-    'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10011'
+    'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10012',
+    'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10013',
+    'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10014',
+    'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10015',
+    'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10012'
   ];
   private proxyAssignments: { [symbol: string]: string } = {
-    'VANTAGE:XAUUSD': 'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10007',
-    'VANTAGE:GER40': 'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10008',
-    'VANTAGE:NAS100': 'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10009',
-    'VANTAGE:BTCUSD': 'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10010'
+    'VANTAGE:XAUUSD': 'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10012',
+    'VANTAGE:GER40': 'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10013',
+    'VANTAGE:NAS100': 'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10014',
+    'VANTAGE:BTCUSD': 'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10015'
   };
-  private marketPriceProxy: string = 'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10011';
-  structuredData: any = {};
+  private marketPriceProxy: string = 'http://sp3l288a8s:7Rr47cOcogJk1+Lhpw@dc.decodo.com:10012';
+
+
+
+  
+   structuredData: any = {};
   lastUpdateTime: number;
-  private readonly maxReconnectAttempts = 5;
   private readonly reconnectDelayBase = 5000; // Base delay in ms
+  private readonly maxReconnectDelay = 30000; // Cap delay at 30 seconds
   private readonly proxyRetryInterval = 10000; // Time to wait before retrying a new proxy
   private chartTimeouts: { [key: string]: NodeJS.Timeout } = {};
   private reconnectAttempts: { [symbol: string]: number } = {};
+  private proxyStatus: { [proxy: string]: { isAlive: boolean; lastChecked: number } } = {};
 
   constructor(
     private readonly httpService: HttpService,
     @Inject('SOCKET_SERVICE') private socketService: SocketService,
     @InjectModel('IndicatorSettings') private indicatorSettingsModel: Model<any>,
     @InjectModel('EmissionSettings') private emissionSettingsModel: Model<any>,
-  ) {}
-
-  private getProxyForSymbol(symbol: string): string {
-    const assignedProxy = this.proxyAssignments[symbol];
-    if (assignedProxy && this.isProxyAlive(assignedProxy)) {
-      return assignedProxy;
-    }
-    const availableProxies = this.proxyList.filter(proxy => proxy !== assignedProxy && this.isProxyAlive(proxy));
-    const fallbackProxy = availableProxies[Math.floor(Math.random() * availableProxies.length)] || this.proxyList[0];
-    this.logger.warn(`[${new Date().toISOString()}] Proxy for ${symbol} failed, falling back to ${fallbackProxy}`);
-    this.proxyAssignments[symbol] = fallbackProxy;
-    return fallbackProxy;
+  ) {
+    // Initialize proxy status
+    this.proxyList.forEach(proxy => {
+      this.proxyStatus[proxy] = { isAlive: true, lastChecked: 0 };
+    });
   }
 
-  private isProxyAlive(proxyUrl: string): boolean {
-    return true;
+  private async isProxyAlive(proxyUrl: string): Promise<boolean> {
+    const now = Date.now();
+    const status = this.proxyStatus[proxyUrl];
+    
+    // Check proxy status only if not recently checked (within 10 seconds)
+    if (status && now - status.lastChecked < this.proxyRetryInterval) {
+      return status.isAlive;
+    }
+
+    try {
+      // Test proxy with a simple HTTP request
+      await axios.get('https://api.ipify.org', {
+        proxy: false,
+        httpAgent: new HttpsProxyAgent(proxyUrl),
+        timeout: 5000,
+      });
+      this.proxyStatus[proxyUrl] = { isAlive: true, lastChecked: now };
+      this.logger.verbose(`Proxy ${proxyUrl} is alive`);
+      return true;
+    } catch (error) {
+      this.proxyStatus[proxyUrl] = { isAlive: false, lastChecked: now };
+      this.logger.warn(`Proxy ${proxyUrl} is unreachable: ${error.message}`);
+      return false;
+    }
+  }
+
+  private async getProxyForSymbol(symbol: string): Promise<string> {
+    let assignedProxy = this.proxyAssignments[symbol];
+    
+    // Check if assigned proxy is alive
+    if (assignedProxy && await this.isProxyAlive(assignedProxy)) {
+      return assignedProxy;
+    }
+
+    // Try other proxies in the list
+    for (const proxy of this.proxyList) {
+      if (proxy !== assignedProxy && await this.isProxyAlive(proxy)) {
+        this.logger.warn(`[${new Date().toISOString()}] Proxy for ${symbol} failed, switching to ${proxy}`);
+        this.proxyAssignments[symbol] = proxy;
+        return proxy;
+      }
+    }
+
+    // If all proxies fail, wait and retry the first proxy
+    this.logger.error(`[${new Date().toISOString()}] No available proxies for ${symbol}, retrying ${this.proxyList[0]}`);
+    await new Promise(resolve => setTimeout(resolve, this.proxyRetryInterval));
+    this.proxyAssignments[symbol] = this.proxyList[0];
+    return this.proxyList[0];
   }
 
   async onModuleInit() {
@@ -335,59 +375,31 @@ export class IndicatorService implements OnModuleInit, OnModuleDestroy {
       await this.initializeTradingView();
     } catch (error) {
       this.logger.error(`[${new Date().toISOString()}] Server startup failed: ${error.message}`);
-      throw error;
+      // Retry initialization after delay
+      setTimeout(() => this.onModuleInit(), this.reconnectDelayBase);
     }
   }
 
   private async initializeTradingView() {
     try {
       for (const symbol of this.symbols) {
-        const creds = this.tvCredentials[symbol];
-        if (!creds || !creds.session || !creds.signature) {
-          this.logger.error(`Missing TradingView session or signature for ${symbol}`);
-          throw new Error(`Missing TradingView session or signature for ${symbol}`);
-        }
-        const proxyUrl = this.getProxyForSymbol(symbol);
-        const proxyAgent = new HttpsProxyAgent(proxyUrl);
-        this.tvClients[symbol] = new Client({
-          token: creds.session,
-          signature: creds.signature,
-          fetchOptions: {
-            agent: proxyAgent,
-          },
-        });
-        
-        this.tvClients[symbol].onError((err: Error) => {
-          try {
-            this.logger.error(`TradingView WebSocket error for ${symbol} using proxy ${proxyUrl}: ${err.message}`, err.stack);
-            this.reinitializeClient(symbol);
-          } catch (error) {
-            this.logger.error(`Failed during error handling for ${symbol}: ${error.message}`, error.stack);
-          }
-        });
-        this.logger.verbose(`TradingView WS connected for ${symbol} using proxy ${proxyUrl}`);
+        await this.initializeClientForSymbol(symbol);
       }
       await this.setupIndicatorsAndPrice();
     } catch (error) {
       this.logger.error(`[${new Date().toISOString()}] TradingView initialization failed: ${error.message}`);
-      throw error;
+      setTimeout(() => this.initializeTradingView(), this.reconnectDelayBase);
     }
   }
 
-  private async reinitializeClient(symbol: string, attempt: number = 1) {
+  private async initializeClientForSymbol(symbol: string, attempt: number = 1) {
     try {
-      if (this.reconnectAttempts[symbol] >= this.maxReconnectAttempts) {
-        this.logger.error(`[${new Date().toISOString()}] Max reconnect attempts reached for ${symbol}`);
-        return;
-      }
-
-      this.reconnectAttempts[symbol] = (this.reconnectAttempts[symbol] || 0) + 1;
-      if (this.tvClients[symbol]) {
-        await this.tvClients[symbol].end();
-        this.tvClients[symbol] = null;
-      }
       const creds = this.tvCredentials[symbol];
-      const proxyUrl = this.getProxyForSymbol(symbol);
+      if (!creds || !creds.session || !creds.signature) {
+        this.logger.error(`Missing TradingView session or signature for ${symbol}`);
+        throw new Error(`Missing TradingView session or signature for ${symbol}`);
+      }
+      const proxyUrl = await this.getProxyForSymbol(symbol);
       const proxyAgent = new HttpsProxyAgent(proxyUrl);
       this.tvClients[symbol] = new Client({
         token: creds.session,
@@ -396,18 +408,60 @@ export class IndicatorService implements OnModuleInit, OnModuleDestroy {
           agent: proxyAgent,
         },
       });
+      
       this.tvClients[symbol].onError((err: Error) => {
-        this.logger.error(`TradingView WebSocket error for ${symbol} using proxy ${proxyUrl}: ${err.message}`, err.stack);
-        setTimeout(() => this.reinitializeClient(symbol, attempt + 1), this.reconnectDelayBase * Math.pow(2, attempt));
+        try {
+          this.logger.error(`TradingView WebSocket error for ${symbol} using proxy ${proxyUrl}: ${err.message}`, err.stack);
+          this.proxyStatus[proxyUrl].isAlive = false; // Mark proxy as dead
+          this.proxyStatus[proxyUrl].lastChecked = Date.now();
+          setTimeout(() => this.reinitializeClient(symbol, attempt + 1), this.calculateReconnectDelay(attempt));
+        } catch (error) {
+          this.logger.error(`Failed during error handling for ${symbol}: ${error.message}`, error.stack);
+        }
       });
-      this.logger.verbose(`TradingView WS reconnected for ${symbol} using proxy ${proxyUrl} (attempt ${attempt})`);
-      this.reconnectAttempts[symbol] = 0;
-      await this.setupIndicatorsAndPrice(symbol);
+      this.logger.verbose(`TradingView WS connected for ${symbol} using proxy ${proxyUrl}`);
+      this.reconnectAttempts[symbol] = 0; // Reset attempts on successful connection
     } catch (error) {
-      this.logger.error(`Failed to reinitialize client for ${symbol} (attempt ${attempt}): ${error.message}`);
-      setTimeout(() => this.reinitializeClient(symbol, attempt + 1), this.reconnectDelayBase * Math.pow(2, attempt));
+      this.logger.error(`Failed to initialize client for ${symbol} (attempt ${attempt}): ${error.message}`);
+      setTimeout(() => this.initializeClientForSymbol(symbol, attempt + 1), this.calculateReconnectDelay(attempt));
     }
   }
+
+  private calculateReconnectDelay(attempt: number): number {
+    // Exponential backoff with a cap
+    return Math.min(this.reconnectDelayBase * Math.pow(2, attempt - 1), this.maxReconnectDelay);
+  }
+
+
+
+
+  private async reinitializeClient(symbol: string, attempt: number = 1) {
+    try {
+      if (this.tvClients[symbol]) {
+        await this.tvClients[symbol].end();
+        this.tvClients[symbol] = null;
+      }
+      await this.initializeClientForSymbol(symbol, attempt);
+      await this.setupIndicatorsAndPrice(symbol);
+      this.logger.verbose(`TradingView WS reconnected for ${symbol} (attempt ${attempt})`);
+    } catch (error) {
+      this.logger.error(`Failed to reinitialize client for ${symbol} (attempt ${attempt}): ${error.message}`);
+      setTimeout(() => this.reinitializeClient(symbol, attempt + 1), this.calculateReconnectDelay(attempt));
+    }
+  }
+
+
+
+
+
+
+
+
+
+
+
+
+
 
   private async initializeVantageData() {
     try {
@@ -793,7 +847,7 @@ export class IndicatorService implements OnModuleInit, OnModuleDestroy {
     for (const { name, id, inputs } of indicators) {
       if (!this.indicatorList.includes(name)) continue;
 
-      const proxyAgent = new HttpsProxyAgent(this.getProxyForSymbol(symbolsToSetup[0]));
+      const proxyAgent = new HttpsProxyAgent(await this.getProxyForSymbol(symbolsToSetup[0]));
       try {
         indicatorsMap[name] = await getIndicator(id, undefined, { agent: proxyAgent });
       } catch (err) {
@@ -867,6 +921,7 @@ export class IndicatorService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+
   private async fetchSpecialIndicators(indicators: any[], symbolsToSetup: string[], timeframesToSetup: string[] = this.timeframes) {
     if (!this.structuredData) {
       this.structuredData = {};
@@ -892,7 +947,7 @@ export class IndicatorService implements OnModuleInit, OnModuleDestroy {
         for (const { name, id, inputs } of indicators) {
           const key = `${symbol}:${timeframe}:${name}`;
           const settings = this.indicatorSettings[key] || {};
-          const proxyAgent = new HttpsProxyAgent(this.getProxyForSymbol(symbol));
+          const proxyAgent = new HttpsProxyAgent(await this.getProxyForSymbol(symbol));
 
           const chart = new client.Session.Chart();
           chart.setMarket(symbol, { timeframe, range: 500 });
@@ -963,6 +1018,8 @@ export class IndicatorService implements OnModuleInit, OnModuleDestroy {
                 };
               }
 
+           
+           
               if (name === 'Pivot Points High Low' && data && data.labels) {
 const finaldata = JSON.stringify(Array.isArray(data.labels) ? data.labels.map(item => item.text) : []);
 const values: number[] = JSON.parse(finaldata).map((val: string) => parseFloat(val));
@@ -997,11 +1054,13 @@ for (const val of sortedValues) {
     const minVal = Math.min(...allValues);
     const maxVal = Math.max(...allValues);
     const avg = allValues.reduce((sum, v) => sum + v, 0) / allValues.length;
-    const diff = (maxVal - minVal).toFixed(2);
+
+    const diff = (maxVal - minVal) / (totalCount - 1); // R
+
     valueEntries.push({
       value: avg,
       count: totalCount,
-      difference: diff,
+    difference: diff.toFixed(4), 
       displayValue: `${avg.toFixed(2)} (${allValues.map(v => v.toFixed(2)).join(', ')})`,
     });
     allValues.forEach(v => processedValues.add(v));
@@ -1021,81 +1080,10 @@ data.processedPivotPoints = valueEntries.map(entry => ({
   count: entry.count,
   difference: entry.difference,
 }));
-              }
+ }
 
 
-                /*
-                 const finaldata = JSON.stringify(Array.isArray(data.labels) ? data.labels.map(item => item.text) : []);
-              const values: number[] = JSON.parse(finaldata).map((val: string) => parseFloat(val));
-             const threshold = await this.getThreshold(symbol, timeframe);
-         const countDict: { [key: number]: number } = {};
-                for (const value of values) {
-                  countDict[value] = (countDict[value] || 0) + 1;
-                }
-                const sortedValues: number[] = [...new Set(values)].sort((a, b) => a - b);
-                const processedValues: Set<number> = new Set();
-                const valueEntries: { value: number; count: number; difference: string; displayValue: string }[] = [];
-                for (const [value, count] of Object.entries(countDict)) {
-                  const val = Number(value);
-                  if (count > 1 && !processedValues.has(val)) {
-                    valueEntries.push({
-                      value: val,
-                      count,
-                      difference: '0.00',
-                      displayValue: val.toFixed(2),
-                    });
-                    processedValues.add(val);
-                  }
-                }
-                for (const val of sortedValues) {
-                  if (processedValues.has(val)) continue;
-                  const count = countDict[val];
-                  if (count > 1) continue;
-                  const index = sortedValues.indexOf(val);
-                  let minDiff = Infinity;
-                  let nearestVal: number | null = null;
-                  if (index > 0) {
-                    const diff = Math.abs(val - sortedValues[index - 1]);
-                    if (diff < minDiff && diff > 0 && diff < threshold && !processedValues.has(sortedValues[index - 1])) {
-                      minDiff = diff;
-                      nearestVal = sortedValues[index - 1];
-                    }
-                  }
-                  if (index < sortedValues.length - 1) {
-                    const diff = Math.abs(val - sortedValues[index + 1]);
-                    if (diff < minDiff && diff > 0 && diff < threshold && !processedValues.has(sortedValues[index + 1])) {
-                      minDiff = diff;
-                      nearestVal = sortedValues[index + 1];
-                    }
-                  }
-                  if (nearestVal !== null && minDiff < threshold) {
-                    const avg = (val + nearestVal) / 2;
-                    valueEntries.push({
-                      value: avg,
-                      count: 2,
-                      difference: `${minDiff.toFixed(2)} (to ${nearestVal.toFixed(2)})`,
-                      displayValue: `${avg.toFixed(2)} (${val.toFixed(2)}, ${nearestVal.toFixed(2)})`,
-                    });
-                    processedValues.add(val);
-                    processedValues.add(nearestVal);
-                  } else {
-                    valueEntries.push({
-                      value: val,
-                      count: 1,
-                      difference: '-',
-                      displayValue: val.toFixed(2),
-                    });
-                    processedValues.add(val);
-                  }
-                }
-                valueEntries.sort((a, b) => b.value - a.value);
-                data.processedPivotPoints = valueEntries.map(entry => ({
-                  value: entry.displayValue,
-                  count: entry.count,
-                  difference: entry.difference,
-                }));
-              
-*/
+
                if (name === 'Pivot Points Standard' && data && data.labels) {
   const labels = data.labels
     .filter((label: any) => label.y != null)
@@ -1131,7 +1119,7 @@ data.processedPivotPoints = valueEntries.map(entry => ({
   private async setupSpecialChart(symbol: string, timeframe: string, id: string, name: string, inputs: (settings: IndicatorSettings) => any) {
     const key = `${symbol}:${timeframe}:${name}`;
     const settings = this.indicatorSettings[key] || {};
-    const proxyAgent = new HttpsProxyAgent(this.getProxyForSymbol(symbol));
+    const proxyAgent = new HttpsProxyAgent(await this.getProxyForSymbol(symbol));
     const client = this.tvClients[symbol];
     if (!client) {
       this.logger.error(`No TradingView client for ${symbol}`);
@@ -1260,82 +1248,7 @@ data.processedPivotPoints = valueEntries.map(entry => ({
   count: entry.count,
   difference: entry.difference,
 }));
-        }
-
-
-          /*
-  const finaldata = JSON.stringify(Array.isArray(data.labels) ? data.labels.map(item => item.text) : []);
-              const values: number[] = JSON.parse(finaldata).map((val: string) => parseFloat(val));
-             const threshold = await this.getThreshold(symbol, timeframe);
-         const countDict: { [key: number]: number } = {};
-                for (const value of values) {
-                  countDict[value] = (countDict[value] || 0) + 1;
-                }
-                const sortedValues: number[] = [...new Set(values)].sort((a, b) => a - b);
-                const processedValues: Set<number> = new Set();
-                const valueEntries: { value: number; count: number; difference: string; displayValue: string }[] = [];
-                for (const [value, count] of Object.entries(countDict)) {
-                  const val = Number(value);
-                  if (count > 1 && !processedValues.has(val)) {
-                    valueEntries.push({
-                      value: val,
-                      count,
-                      difference: '0.00',
-                      displayValue: val.toFixed(2),
-                    });
-                    processedValues.add(val);
-                  }
-                }
-                for (const val of sortedValues) {
-                  if (processedValues.has(val)) continue;
-                  const count = countDict[val];
-                  if (count > 1) continue;
-                  const index = sortedValues.indexOf(val);
-                  let minDiff = Infinity;
-                  let nearestVal: number | null = null;
-                  if (index > 0) {
-                    const diff = Math.abs(val - sortedValues[index - 1]);
-                    if (diff < minDiff && diff > 0 && diff < threshold && !processedValues.has(sortedValues[index - 1])) {
-                      minDiff = diff;
-                      nearestVal = sortedValues[index - 1];
-                    }
-                  }
-                  if (index < sortedValues.length - 1) {
-                    const diff = Math.abs(val - sortedValues[index + 1]);
-                    if (diff < minDiff && diff > 0 && diff < threshold && !processedValues.has(sortedValues[index + 1])) {
-                      minDiff = diff;
-                      nearestVal = sortedValues[index + 1];
-                    }
-                  }
-                  if (nearestVal !== null && minDiff < threshold) {
-                    const avg = (val + nearestVal) / 2;
-                    valueEntries.push({
-                      value: avg,
-                      count: 2,
-                      difference: `${minDiff.toFixed(2)} (to ${nearestVal.toFixed(2)})`,
-                      displayValue: `${avg.toFixed(2)} (${val.toFixed(2)}, ${nearestVal.toFixed(2)})`,
-                    });
-                    processedValues.add(val);
-                    processedValues.add(nearestVal);
-                  } else {
-                    valueEntries.push({
-                      value: val,
-                      count: 1,
-                      difference: 'no',
-                      displayValue: val.toFixed(2),
-                    });
-                    processedValues.add(val);
-                  }
-                }
-                valueEntries.sort((a, b) => b.value - a.value);
-                data.processedPivotPoints = valueEntries.map(entry => ({
-                  value: entry.displayValue,
-                  count: entry.count,
-                  difference: entry.difference,
-                }));
-        
-
-    */
+    }
 
 
          if (name === 'Pivot Points Standard' && data && data.labels) {
